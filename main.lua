@@ -568,9 +568,40 @@ local function getOwnedCombatItems()
     return result
 end
 
+
+local function getChild(container, name)
+    if typeof(container) == "Instance" then
+        return container:FindFirstChild(name)
+    end
+
+    if type(container) == "table" then
+        return container[name]
+    end
+
+    return nil
+end
+
+local function getValue(object)
+    if typeof(object) == "Instance" then
+        return object.Value
+    end
+
+    if type(object) == "table" then
+        if object.Value ~= nil then
+            return object.Value
+        end
+
+        if object.Id ~= nil then
+            return object.Id
+        end
+    end
+
+    return object
+end
+
 local function getToolbar(data)
-    local inventory = data and data:FindFirstChild("Inventory")
-    return inventory and inventory:FindFirstChild("Toolbar")
+    local inventory = getChild(data, "Inventory")
+    return getChild(inventory, "Toolbar")
 end
 
 local function findItemSlot(toolbar, itemId)
@@ -579,15 +610,16 @@ local function findItemSlot(toolbar, itemId)
     end
 
     for _, slot in ipairs(TOOLBAR_SLOTS) do
-        local value = toolbar:FindFirstChild(slot.Name)
+        local value = getChild(toolbar, slot.Name)
 
-        if value and tonumber(value.Value) == itemId then
+        if value and tonumber(getValue(value)) == itemId then
             return slot
         end
     end
 
     return nil
 end
+
 
 local function selectToolbarSlot(slot)
     if not slot then
