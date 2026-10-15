@@ -36,7 +36,7 @@ NovaUI:SetTheme("Neon")
 
 local Window = NovaUI:CreateWindow({
     Title = "Slayer Admin Auto",
-    Version = "v0.2 - Fixed Target Lock",
+    Version = "v0.3 - Auto Block",
     Subtitle = "Client-side prototype",
     Logo = "◈",
 })
@@ -65,6 +65,7 @@ local LootTab = Window:AddTab({
 local State = {
     Enabled = false,
     AutoCombat = true,
+    AutoBlock = true, -- เปิดใช้งาน Auto Block เป็นค่าเริ่มต้น
     AutoChest = true,
     AutoLoot = true,
     UseDash = true,
@@ -77,7 +78,7 @@ local State = {
     Busy = false,
     Generation = 0,
     LastStatus = "",
-    CurrentTarget = nil, -- เพิ่มตัวแปรสำหรับล็อคเป้าหมาย NPC ตัวเดิม
+    CurrentTarget = nil,
 }
 
 local Config = {
@@ -85,9 +86,10 @@ local Config = {
     LOOT_TAG = (GameSettings and GameSettings.Tags and GameSettings.Tags.LootDrop) or "LootDrop",
     CHEST_TAG = (GameSettings and GameSettings.Tags and GameSettings.Tags.Chest) or "Chest",
     ATTACK_RANGE = 9,
+    BLOCK_RANGE = 12, -- ระยะที่เริ่มยกบล็อกเมื่อศัตรูเข้าใกล้
     PICKUP_RANGE = 8,
     CHEST_RANGE = 9,
-    TARGET_SCAN_RANGE = 120, -- ปรับระยะสแกนให้แคบลงเล็กน้อย ป้องกันการวิ่งสลับเป้าหมายไกลเกินไป
+    TARGET_SCAN_RANGE = 120,
     DASH_ESTIMATED_DISTANCE = 14,
     DASH_COOLDOWN = 0.8,
     TELEPORT_DISTANCE = 100,
@@ -96,18 +98,9 @@ local Config = {
     MOVE_TIMEOUT = 5,
 }
 
--- On-screen diagnostic console: captures client errors and warnings.
-local ConsoleState = {
-    Lines = {},
-    MaxLines = 35,
-    LastError = "No errors recorded.",
-}
-
-local consoleGui
-local consolePanel
-local consoleLog
-local consoleStatus
-local consoleListLayout
+-- On-screen diagnostic console
+local ConsoleState = { Lines = {}, MaxLines = 35, LastError = "No errors recorded." }
+local consoleGui, consolePanel, consoleLog, consoleStatus, consoleListLayout
 
 local function pushConsoleLine(level, message)
     message = tostring(message)
@@ -131,9 +124,7 @@ local function pushConsoleLine(level, message)
 
     if consoleLog then
         for _, child in ipairs(consoleLog:GetChildren()) do
-            if child:IsA("TextLabel") then
-                child:Destroy()
-            end
+            if child:IsA("TextLabel") then child:Destroy() end
         end
 
         for _, savedLine in ipairs(ConsoleState.Lines) do
@@ -150,21 +141,15 @@ local function pushConsoleLine(level, message)
             label.TextXAlignment = Enum.TextXAlignment.Left
             label.TextYAlignment = Enum.TextYAlignment.Top
             label.Text = savedLine
-            label.TextColor3 = isError
-                and Color3.fromRGB(255, 110, 110)
-                or (isWarning and Color3.fromRGB(255, 196, 100)
-                    or Color3.fromRGB(210, 220, 235))
+            label.TextColor3 = isError and Color3.fromRGB(255, 110, 110)
+                or (isWarning and Color3.fromRGB(255, 196, 100) or Color3.fromRGB(210, 220, 235))
             label.Parent = consoleLog
         end
 
         task.defer(function()
             if consoleLog and consoleListLayout then
-                consoleLog.CanvasSize = UDim2.new(
-                    0, 0, 0, consoleListLayout.AbsoluteContentSize.Y + 12
-                )
-                consoleLog.CanvasPosition = Vector2.new(
-                    0, math.max(0, consoleListLayout.AbsoluteContentSize.Y)
-                )
+                consoleLog.CanvasSize = UDim2.new(0, 0, 0, consoleListLayout.AbsoluteContentSize.Y + 12)
+                consoleLog.CanvasPosition = Vector2.new(0, math.max(0, consoleListLayout.AbsoluteContentSize.Y))
             end
         end)
     end
@@ -172,15 +157,10 @@ end
 
 local function createDiagnosticConsole()
     local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
-    if not playerGui then
-        warn("[SlayerAuto] PlayerGui was not available; on-screen console was not created.")
-        return
-    end
+    if not playerGui then return end
 
     local oldGui = playerGui:FindFirstChild("SlayerAutoDiagnosticConsole")
-    if oldGui then
-        oldGui:Destroy()
-    end
+    if oldGui then oldGui:Destroy() end
 
     consoleGui = Instance.new("ScreenGui")
     consoleGui.Name = "SlayerAutoDiagnosticConsole"
@@ -208,7 +188,7 @@ local function createDiagnosticConsole()
     header.Position = UDim2.new(0, 10, 0, 5)
     header.Size = UDim2.new(1, -100, 0, 25)
     header.Font = Enum.Font.GothamBold
-    header.Text = "SLAYER AUTO  /  CONSOLE"
+    header.Text = "SLAYER AUTO / CONSOLE"
     header.TextSize = 13
     header.TextColor3 = Color3.fromRGB(230, 235, 245)
     header.TextXAlignment = Enum.TextXAlignment.Left
@@ -234,7 +214,7 @@ local function createDiagnosticConsole()
     consoleStatus.Position = UDim2.new(0, 8, 0, 34)
     consoleStatus.Size = UDim2.new(1, -16, 0, 30)
     consoleStatus.Font = Enum.Font.Gotham
-    consoleStatus.Text = "Status: Console ready; waiting for errors."
+    consoleStatus.Text = "Status: Console ready with Auto Block."
     consoleStatus.TextSize = 11
     consoleStatus.TextColor3 = Color3.fromRGB(160, 220, 180)
     consoleStatus.TextWrapped = true
@@ -283,7 +263,7 @@ local function createDiagnosticConsole()
         openButton.Visible = false
     end)
 
-    pushConsoleLine("INFO", "Console initialized with Target Lock.")
+    pushConsoleLine("INFO", "Console initialized.")
 end
 
 createDiagnosticConsole()
@@ -299,9 +279,7 @@ LogService.MessageOut:Connect(function(message, messageType)
 end)
 
 local function status(message, notify)
-    if State.LastStatus == message then
-        return
-    end
+    if State.LastStatus == message then return end
     State.LastStatus = message
     print("[SlayerAuto] " .. message)
     if consoleStatus and ConsoleState.LastError == "No errors recorded." then
@@ -320,23 +298,15 @@ end
 
 local function getCharacter()
     local character = LocalPlayer.Character
-    if not character or not character.Parent then
-        return nil, nil, nil
-    end
-
+    if not character or not character.Parent then return nil, nil, nil end
     local humanoid = character:FindFirstChildOfClass("Humanoid")
     local root = character:FindFirstChild("HumanoidRootPart")
-    if not humanoid or humanoid.Health <= 0 or not root then
-        return character, nil, nil
-    end
-
+    if not humanoid or humanoid.Health <= 0 or not root then return character, nil, nil end
     return character, humanoid, root
 end
 
 local function getModelRoot(model)
-    if not model or not model:IsA("Model") then
-        return nil
-    end
+    if not model or not model:IsA("Model") then return nil end
     return model:FindFirstChild("HumanoidRootPart")
         or model.PrimaryPart
         or model:FindFirstChildWhichIsA("BasePart")
@@ -346,14 +316,10 @@ local function isPlayerCharacter(model)
     return Players:GetPlayerFromCharacter(model) ~= nil
 end
 
--- ฟังก์ชันเลือกและล็อคเป้าหมาย (Target Lock System)
 local function getNearestNPC()
     local character, _, root = getCharacter()
-    if not root then
-        return nil
-    end
+    if not root then return nil end
 
-    -- 1. ถ้ามีเป้าหมายเดิมอยู่ และยังไม่ตาย ให้ใช้เป้าหมายเดิมต่อเนื่อง
     if State.CurrentTarget and State.CurrentTarget.Parent then
         local humanoid = State.CurrentTarget:FindFirstChildOfClass("Humanoid")
         local targetRoot = getModelRoot(State.CurrentTarget)
@@ -363,11 +329,8 @@ local function getNearestNPC()
         end
     end
 
-    -- 2. ถ้าไม่มีเป้าหมายเดิม หรือเป้าหมายตายแล้ว ให้หาตัวที่ใกล้ที่สุดใหม่
     State.CurrentTarget = nil
-    local bestModel
-    local bestHumanoid
-    local bestRoot
+    local bestModel, bestHumanoid, bestRoot
     local bestDistance = Config.TARGET_SCAN_RANGE
 
     for _, model in ipairs(CollectionService:GetTagged(Config.NPC_TAG)) do
@@ -387,53 +350,28 @@ local function getNearestNPC()
         end
     end
 
-    if bestModel then
-        State.CurrentTarget = bestModel
-    end
-
+    if bestModel then State.CurrentTarget = bestModel end
     return bestModel, bestHumanoid, bestRoot, bestDistance
 end
 
 local function getPrompt(instance)
-    if not instance then
-        return nil
-    end
-    if instance:IsA("ProximityPrompt") then
-        return instance
-    end
+    if not instance then return nil end
+    if instance:IsA("ProximityPrompt") then return instance end
     return instance:FindFirstChildWhichIsA("ProximityPrompt", true)
 end
 
 local function getNearestTaggedPart(tag, maxDistance)
     local _, _, root = getCharacter()
-    if not root then
-        return nil
-    end
+    if not root then return nil end
 
-    local bestInstance
-    local bestPrompt
-    local bestDistance = maxDistance
-
+    local bestInstance, bestPrompt, bestDistance = nil, nil, maxDistance
     for _, instance in ipairs(CollectionService:GetTagged(tag)) do
         if instance.Parent then
-            local part
-            if instance:IsA("BasePart") then
-                part = instance
-            elseif instance:IsA("Model") then
-                part = getModelRoot(instance)
-            end
-
+            local part = instance:IsA("BasePart") and instance or getModelRoot(instance)
             local prompt = getPrompt(instance)
             if part and prompt and prompt.Enabled then
-                local owner = instance:GetAttribute("DropOwnerUserId")
-                local reserved = instance:GetAttribute("DropReservedFor")
-                local eligible = not (typeof(owner) == "number" and owner ~= LocalPlayer.UserId)
-                if typeof(reserved) == "string" and not string.find(reserved, "," .. LocalPlayer.UserId .. ",", 1, true) then
-                    eligible = false
-                end
-
                 local distance = (part.Position - root.Position).Magnitude
-                if eligible and distance < bestDistance then
+                if distance < bestDistance then
                     bestDistance = distance
                     bestInstance = instance
                     bestPrompt = prompt
@@ -441,20 +379,14 @@ local function getNearestTaggedPart(tag, maxDistance)
             end
         end
     end
-
     return bestInstance, bestPrompt, bestDistance
 end
 
 local function getNearestChest()
     local _, _, root = getCharacter()
-    if not root then
-        return nil
-    end
+    if not root then return nil end
 
-    local bestChest
-    local bestPrompt
-    local bestDistance = Config.TARGET_SCAN_RANGE
-
+    local bestChest, bestPrompt, bestDistance = nil, nil, Config.TARGET_SCAN_RANGE
     for _, chest in ipairs(CollectionService:GetTagged(Config.CHEST_TAG)) do
         if chest.Parent then
             local part = chest:IsA("BasePart") and chest or getModelRoot(chest)
@@ -469,19 +401,13 @@ local function getNearestChest()
             end
         end
     end
-
     return bestChest, bestPrompt, bestDistance
 end
 
 local function startAutoRun()
     if not RunHandler then return end
-    if RunHandler.Is_Running == true or RunHandler.Toggled == true or InputHandler.IsDown("Run") then
-        return
-    end
-
-    if State.AutoRunHeld or State.AutoRunToggledByAuto then
-        return
-    end
+    if RunHandler.Is_Running == true or RunHandler.Toggled == true or InputHandler.IsDown("Run") then return end
+    if State.AutoRunHeld or State.AutoRunToggledByAuto then return end
 
     local wasToggled = RunHandler.Toggled == true
     InputHandler.VirtualPress("Run", Enum.UserInputType.Keyboard)
@@ -499,7 +425,6 @@ local function stopAutoRun()
         InputHandler.VirtualRelease("Run")
         State.AutoRunHeld = false
     end
-
     if State.AutoRunToggledByAuto then
         if RunHandler and RunHandler.Toggled == true then
             InputHandler.VirtualPress("Run", Enum.UserInputType.Keyboard)
@@ -510,69 +435,41 @@ local function stopAutoRun()
 end
 
 local function moveToPositionInternal(position, generation)
-    local character, humanoid, root = getCharacter()
-    if not humanoid or not root then
-        return false
-    end
+    local _, humanoid, root = getCharacter()
+    if not humanoid or not root then return false end
 
-    local path = PathfindingService:CreatePath({
-        AgentCanJump = true,
-        WaypointSpacing = 5,
-    })
-
-    local ok = pcall(function()
-        path:ComputeAsync(root.Position, position)
-    end)
+    local path = PathfindingService:CreatePath({ AgentCanJump = true, WaypointSpacing = 5 })
+    local ok = pcall(function() path:ComputeAsync(root.Position, position) end)
 
     if not ok or path.Status ~= Enum.PathStatus.Success then
         humanoid:MoveTo(position)
         local started = os.clock()
         while State.Enabled and State.Generation == generation and os.clock() - started < Config.MOVE_TIMEOUT do
-            local _, currentHumanoid, currentRoot = getCharacter()
-            if not currentHumanoid or not currentRoot then
-                return false
-            end
-            if (currentRoot.Position - position).Magnitude <= 4 then
-                return true
-            end
+            local _, curHum, curRoot = getCharacter()
+            if not curHum or not curRoot then return false end
+            if (curRoot.Position - position).Magnitude <= 4 then return true end
             task.wait(0.05)
         end
         return false
     end
 
     for _, waypoint in ipairs(path:GetWaypoints()) do
-        if not State.Enabled or State.Generation ~= generation then
-            return false
-        end
+        if not State.Enabled or State.Generation ~= generation then return false end
+        local _, curHum, curRoot = getCharacter()
+        if not curHum or not curRoot then return false end
 
-        local _, currentHumanoid, currentRoot = getCharacter()
-        if not currentHumanoid or not currentRoot then
-            return false
-        end
+        if (curRoot.Position - position).Magnitude <= 4 then return true end
+        if waypoint.Action == Enum.PathWaypointAction.Jump then curHum.Jump = true end
 
-        if (currentRoot.Position - position).Magnitude <= 4 then
-            return true
-        end
-
-        if waypoint.Action == Enum.PathWaypointAction.Jump then
-            currentHumanoid.Jump = true
-        end
-
-        currentHumanoid:MoveTo(waypoint.Position)
+        curHum:MoveTo(waypoint.Position)
         local started = os.clock()
-
         while State.Enabled and State.Generation == generation and os.clock() - started < 1.2 do
-            local _, checkHumanoid, checkRoot = getCharacter()
-            if not checkHumanoid or not checkRoot then
-                return false
-            end
-            if (checkRoot.Position - waypoint.Position).Magnitude <= 3 then
-                break
-            end
+            local _, checkHum, checkRoot = getCharacter()
+            if not checkHum or not checkRoot then return false end
+            if (checkRoot.Position - waypoint.Position).Magnitude <= 3 then break end
             task.wait(0.05)
         end
     end
-
     return true
 end
 
@@ -580,136 +477,24 @@ local function moveToPosition(position, generation)
     startAutoRun()
     local ok, reached = pcall(moveToPositionInternal, position, generation)
     stopAutoRun()
-
-    if not ok then
-        return false
-    end
-    return reached == true
+    return ok and reached == true
 end
 
-local lastDashAt = 0
-local lastTeleportAt = -math.huge
-
-local function maybeTeleportToward(targetPosition, distance, generation)
-    if not State.UseTeleport or distance < Config.TELEPORT_DISTANCE then
-        return false
-    end
-    if os.clock() - lastTeleportAt < Config.TELEPORT_COOLDOWN then
-        return false
-    end
-    if SequenceTeleport and SequenceTeleport.IsActive() then
-        return false
-    end
-    if not State.Enabled or State.Generation ~= generation then
-        return false
+-- ระบบ Auto Blocking (กดปุ่ม Block ค้างไว้เมื่อศัตรูอยู่ในระยะประชิด)
+local function updateAutoBlock(targetDistance)
+    if not State.AutoBlock then
+        return
     end
 
-    local _, humanoid, root = getCharacter()
-    if not humanoid or not root then
-        return false
+    if targetDistance <= Config.BLOCK_RANGE then
+        pcall(function()
+            InputHandler.VirtualPress("Block", Enum.UserInputType.Touch)
+        end)
+    else
+        pcall(function()
+            InputHandler.VirtualRelease("Block")
+        end)
     end
-
-    local flatDirection = Vector3.new(
-        targetPosition.X - root.Position.X,
-        0,
-        targetPosition.Z - root.Position.Z
-    )
-    local destinationPosition = targetPosition
-    if flatDirection.Magnitude > 0.01 then
-        destinationPosition -= flatDirection.Unit * Config.TELEPORT_OFFSET
-    end
-
-    local destination = CFrame.new(destinationPosition) * root.CFrame.Rotation
-    local ok, controller = pcall(function()
-        return SequenceTeleport.Start({
-            FallLength = 1,
-            TeleportAtFall = 0.5,
-            RiseLength = 1,
-            Destination = destination,
-        })
-    end)
-
-    if not ok or not controller then
-        return false
-    end
-
-    lastTeleportAt = os.clock()
-    status(("Teleporting: %.0f studs away"):format(distance), true)
-
-    local started = os.clock()
-    while controller.IsActive() and os.clock() - started < 8 do
-        task.wait(0.1)
-    end
-
-    return true
-end
-
-local function getDashLetter(direction)
-    local camera = workspace.CurrentCamera
-    if not camera then
-        return "W"
-    end
-
-    local forward = Vector3.new(camera.CFrame.LookVector.X, 0, camera.CFrame.LookVector.Z)
-    if forward.Magnitude < 0.01 then
-        return "W"
-    end
-    forward = forward.Unit
-
-    local right = Vector3.new(-forward.Z, 0, forward.X)
-    local dir = Vector3.new(direction.X, 0, direction.Z)
-    if dir.Magnitude < 0.01 then
-        return "W"
-    end
-    dir = dir.Unit
-
-    local x = dir:Dot(right)
-    local y = dir:Dot(forward)
-    if math.abs(x) > math.abs(y) then
-        return x > 0 and "D" or "A"
-    end
-    return y > 0 and "W" or "S"
-end
-
-local function maybeDashToward(targetPosition, distance)
-    if not State.UseDash or distance <= Config.DASH_ESTIMATED_DISTANCE + Config.ATTACK_RANGE then
-        return false
-    end
-    if os.clock() - lastDashAt < Config.DASH_COOLDOWN then
-        return false
-    end
-
-    local _, humanoid, root = getCharacter()
-    if not humanoid or not root then
-        return false
-    end
-
-    local direction = targetPosition - root.Position
-    direction = Vector3.new(direction.X, 0, direction.Z)
-    if direction.Magnitude < 0.01 then
-        return false
-    end
-    direction = direction.Unit
-
-    local predictedPosition = root.Position + direction * Config.DASH_ESTIMATED_DISTANCE
-    local predictedDistance = (targetPosition - predictedPosition).Magnitude
-
-    if predictedDistance < 5 or predictedDistance > Config.ATTACK_RANGE + 2 then
-        return false
-    end
-
-    local didDash = false
-    local ok = pcall(function()
-        didDash = DashHandler.Perform(getDashLetter(direction))
-    end)
-
-    if ok and didDash then
-        lastDashAt = os.clock()
-        task.wait(0.2)
-        return true
-    end
-
-    return false
 end
 
 -- Inventory / Hotbar weapon selector
@@ -722,84 +507,52 @@ local TOOLBAR_SLOTS = {
 }
 
 local function getInventoryData()
-    local ok, data = pcall(function()
-        return Utility.GetData(LocalPlayer, true)
-    end)
+    local ok, data = pcall(function() return Utility.GetData(LocalPlayer, true) end)
     return ok and data or nil
 end
 
 local function getOwnedCombatItems()
     local result = {}
-    local ok, bags = pcall(function()
-        return CharacterInfo.GetItemBags(LocalPlayer)
-    end)
-
-    if not ok or type(bags) ~= "table" then
-        return result
-    end
+    local ok, bags = pcall(function() return CharacterInfo.GetItemBags(LocalPlayer) end)
+    if not ok or type(bags) ~= "table" then return result end
 
     for _, bag in ipairs(bags) do
         if typeof(bag) == "Instance" then
             for _, entry in ipairs(bag:GetChildren()) do
                 local definition = CollectibleItems[entry.Name]
-
-                if type(definition) == "table"
-                    and definition.HasCombat == true
-                    and type(definition.CombatPreset) == "string" then
-
+                if type(definition) == "table" and definition.HasCombat == true and type(definition.CombatPreset) == "string" then
                     local idObject = entry:FindFirstChild("Id")
                     local itemId = idObject and tonumber(idObject.Value)
-
                     if itemId then
                         local score = 0
                         local stats = definition.ActiveToolStats
-
                         if type(stats) == "table" then
                             for statName, value in pairs(stats) do
                                 if typeof(value) == "number" then
                                     local name = string.lower(tostring(statName))
-                                    if string.find(name, "damage", 1, true) then
-                                        score += value * 100
-                                    else
-                                        score += value
-                                    end
+                                    if string.find(name, "damage", 1, true) then score += value * 100 else score += value end
                                 end
                             end
                         end
-
                         local rarity = definition.Rarity
-                        if typeof(rarity) == "number" then
-                            score += rarity * 10
-                        end
-
-                        table.insert(result, {
-                            Id = itemId,
-                            Name = entry.Name,
-                            Score = score,
-                        })
+                        if typeof(rarity) == "number" then score += rarity * 10 end
+                        table.insert(result, { Id = itemId, Name = entry.Name, Score = score })
                     end
                 end
             end
         end
     end
-
     return result
 end
 
 local function getChild(container, name)
-    if typeof(container) == "Instance" then
-        return container:FindFirstChild(name)
-    end
-    if type(container) == "table" then
-        return container[name]
-    end
+    if typeof(container) == "Instance" then return container:FindFirstChild(name) end
+    if type(container) == "table" then return container[name] end
     return nil
 end
 
 local function getValue(object)
-    if typeof(object) == "Instance" then
-        return object.Value
-    end
+    if typeof(object) == "Instance" then return object.Value end
     if type(object) == "table" then
         if object.Value ~= nil then return object.Value end
         if object.Id ~= nil then return object.Id end
@@ -816,9 +569,7 @@ local function findItemSlot(toolbar, itemId)
     if not toolbar then return nil end
     for _, slot in ipairs(TOOLBAR_SLOTS) do
         local value = getChild(toolbar, slot.Name)
-        if value and tonumber(getValue(value)) == itemId then
-            return slot
-        end
+        if value and tonumber(getValue(value)) == itemId then return slot end
     end
     return nil
 end
@@ -838,7 +589,6 @@ local function selectBestAvailableWeapon()
     if not State.AutoBestWeapon then return false end
     local data = getInventoryData()
     if not data then return false end
-
     local toolbar = getToolbar(data)
     if not toolbar then return false end
 
@@ -861,10 +611,7 @@ local function selectBestAvailableWeapon()
             end
         end
         slot = slot or TOOLBAR_SLOTS[#TOOLBAR_SLOTS]
-
-        pcall(function()
-            SignalEvent.ToServer("Toolbar_Equip", slot.Name, bestItem.Id)
-        end)
+        pcall(function() SignalEvent.ToServer("Toolbar_Equip", slot.Name, bestItem.Id) end)
         task.wait(0.2)
     end
 
@@ -886,16 +633,11 @@ local function attackWhileClose(targetModel, targetHumanoid, generation)
     InputHandler.VirtualPress("Combat", Enum.UserInputType.Touch)
     
     local started = os.clock()
-    while State.Enabled
-        and State.Generation == generation
-        and targetModel.Parent
-        and targetHumanoid.Health > 0
-        and os.clock() - started < 0.3 do
-        
-        local _, currentHumanoid, currentRoot = getCharacter()
-        local currentTargetRoot = getModelRoot(targetModel)
-        if not currentHumanoid or not currentRoot or not currentTargetRoot then break end
-        if (currentTargetRoot.Position - currentRoot.Position).Magnitude > Config.ATTACK_RANGE + 2 then break end
+    while State.Enabled and State.Generation == generation and targetModel.Parent and targetHumanoid.Health > 0 and os.clock() - started < 0.3 do
+        local _, curHum, curRoot = getCharacter()
+        local curTargetRoot = getModelRoot(targetModel)
+        if not curHum or not curRoot or not curTargetRoot then break end
+        if (curTargetRoot.Position - curRoot.Position).Magnitude > Config.ATTACK_RANGE + 2 then break end
         task.wait(0.02)
     end
 
@@ -915,9 +657,7 @@ local function activatePrompt(prompt, generation)
         moveToPosition(parentPart.Position, generation)
     end
 
-    if not State.Enabled or State.Generation ~= generation or not prompt.Parent or not prompt.Enabled then
-        return false
-    end
+    if not State.Enabled or State.Generation ~= generation or not prompt.Parent or not prompt.Enabled then return false end
 
     pcall(function() prompt:InputHoldBegin() end)
     task.wait(math.max(prompt.HoldDuration, 0) + 0.05)
@@ -925,7 +665,7 @@ local function activatePrompt(prompt, generation)
     return true
 end
 
--- ลูปการทำงานหลัก (Auto Farm Loop)
+-- ลูปการทำงานหลัก (Auto Farm Loop) พร้อมระบบ Auto Block
 local function runFarm(generation)
     while State.Enabled and State.Generation == generation do
         local _, humanoid, root = getCharacter()
@@ -935,25 +675,27 @@ local function runFarm(generation)
             continue
         end
 
-        -- 1. จัดการ NPC ที่ล็อคเป้าไว้ก่อนเป็นอันดับแรก
+        -- 1. จัดการ NPC และเช็คระยะเพื่อทำ Auto Block
         local npc, npcHumanoid, npcRoot, npcDistance = getNearestNPC()
         if npc and npcHumanoid and npcRoot then
             status("Attacking: " .. npc.Name .. " (" .. math.floor(npcHumanoid.Health) .. " HP)")
+            
+            -- ทำการบล็อกอัตโนมัติหากศัตรูเข้ามาในระยะ Block
+            updateAutoBlock(npcDistance)
+
             if npcDistance > Config.ATTACK_RANGE then
-                if State.UseTeleport and SequenceTeleport.IsActive() then
-                    task.wait(0.1)
-                elseif not maybeTeleportToward(npcRoot.Position, npcDistance, generation) then
-                    if not maybeDashToward(npcRoot.Position, npcDistance) then
-                        moveToPosition(npcRoot.Position, generation)
-                    end
-                end
+                moveToPosition(npcRoot.Position, generation)
+            else
+                attackWhileClose(npc, npcHumanoid, generation)
             end
-            attackWhileClose(npc, npcHumanoid, generation)
             task.wait(0.02)
             continue
+        else
+            -- ปล่อยปุ่มบล็อกเมื่อไม่มีเป้าหมาย
+            updateAutoBlock(999)
         end
 
-        -- 2. เปิดหีบ (ถ้าเปิดใช้งาน)
+        -- 2. เปิดหีบ
         if State.AutoChest then
             local chest, chestPrompt, chestDistance = getNearestChest()
             if chest and chestPrompt then
@@ -968,7 +710,7 @@ local function runFarm(generation)
             end
         end
 
-        -- 3. เก็บของดร็อป (ถ้าเปิดใช้งาน)
+        -- 3. เก็บของดร็อป
         if State.AutoLoot then
             local drop, dropPrompt, dropDistance = getNearestTaggedPart(Config.LOOT_TAG, Config.TARGET_SCAN_RANGE)
             if drop and dropPrompt then
@@ -988,6 +730,7 @@ local function runFarm(generation)
     end
 
     InputHandler.VirtualRelease("Combat")
+    pcall(function() InputHandler.VirtualRelease("Block") end)
     stopAutoRun()
     State.Busy = false
     State.CurrentTarget = nil
@@ -995,14 +738,14 @@ end
 
 local farmSection = FarmingTab:AddSection({
     Title = "Automation",
-    Description = "Auto Farm with Target Lock and fast execution.",
+    Description = "Auto Farm with Target Lock and Auto Block.",
     Icon = "⚙",
     Color = Color3.fromRGB(79, 209, 197),
 })
 
 farmSection:AddToggle({
     Title = "Auto Farm",
-    Description = "Lock target, attack until dead, then switch.",
+    Description = "Lock target, attack, and block automatically.",
     Default = false,
     Callback = function(on)
         State.Generation += 1
@@ -1010,7 +753,10 @@ farmSection:AddToggle({
         State.Enabled = on
     
         if not on then
-            pcall(function() InputHandler.VirtualRelease("Combat") end)
+            pcall(function() 
+                InputHandler.VirtualRelease("Combat") 
+                InputHandler.VirtualRelease("Block")
+            end)
             stopAutoRun()
             State.CurrentTarget = nil
             status("Auto Farm disabled", true)
@@ -1024,7 +770,10 @@ farmSection:AddToggle({
                 runFarm(generation)
             end, debug.traceback)
     
-            pcall(function() InputHandler.VirtualRelease("Combat") end)
+            pcall(function() 
+                InputHandler.VirtualRelease("Combat") 
+                InputHandler.VirtualRelease("Block")
+            end)
             stopAutoRun()
     
             if not ok then
@@ -1046,6 +795,19 @@ farmSection:AddToggle({
     Callback = function(on)
         State.AutoCombat = on
         if not on then InputHandler.VirtualRelease("Combat") end
+    end,
+})
+
+-- เพิ่มปุ่มเปิด/ปิด Auto Block ในหมวด Automation
+farmSection:AddToggle({
+    Title = "Auto Block",
+    Description = "Automatically blocks when enemies are close.",
+    Default = true,
+    Callback = function(on)
+        State.AutoBlock = on
+        if not on then
+            pcall(function() InputHandler.VirtualRelease("Block") end)
+        end
     end,
 })
 
@@ -1095,7 +857,10 @@ movementSection:AddButton({
         State.Enabled = false
         State.Generation += 1
         State.CurrentTarget = nil
-        InputHandler.VirtualRelease("Combat")
+        pcall(function() 
+            InputHandler.VirtualRelease("Combat") 
+            InputHandler.VirtualRelease("Block")
+        end)
         stopAutoRun()
         status("Stopped manually", true)
     end,
@@ -1103,7 +868,7 @@ movementSection:AddButton({
 
 Window:Notify({
     Title = "Slayer Auto Loaded",
-    Content = "Target Lock & Speed improvements applied.",
+    Content = "Auto Block feature successfully added.",
     Type = "info",
     Duration = 5,
 })
