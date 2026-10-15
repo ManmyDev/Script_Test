@@ -8,6 +8,7 @@ local LocalPlayer = Players.LocalPlayer
 local NovaURL = "https://raw.githubusercontent.com/ManmyDev/Nova_UI/refs/heads/main/NovaUI.lua"
 local NovaUI = loadstring(game:HttpGet(NovaURL))()
 local InputHandler = require(ReplicatedStorage.CAM.Client.Components.Client.InputHandler)
+local RunHandler = require(ReplicatedStorage.CAM.Client.Modules.GamePlay.Run_Handler)
 local DashHandler = require(ReplicatedStorage.CAM.Client.Modules.GamePlay.Dash_Handler)
 local SequenceTeleport = require(ReplicatedStorage.CAM.Client.Modules.SequenceTeleport)
 local GameSettings = require(ReplicatedStorage.CAM.Global.gameSettings)
