@@ -48,6 +48,9 @@ local State = {
     AutoLoot = true,
     UseDash = true,
     UseTeleport = true,
+    SelectedWeaponSlot = 1,
+    AutoBestWeapon = true,
+    LastBestWeapon = nil,
     Busy = false,
     Generation = 0,
     LastStatus = "",
@@ -420,6 +423,161 @@ local function maybeDashToward(targetPosition, distance)
     return false
 end
 
+
+local function getToolNumericScore(tool)
+    local score = 0
+    local foundStat = false
+
+    local numericAttributes = {
+        "Damage", "BaseDamage", "WeaponDamage", "AttackDamage",
+        "Power", "WeaponPower", "Level", "Mastery", "WeaponLevel",
+    }
+
+    for _, attributeName in ipairs(numericAttributes) do
+        local value = tool:GetAttribute(attributeName)
+        if typeof(value) == "number" then
+            foundStat = true
+            local weight = 1
+            if attributeName == "Damage" or attributeName == "BaseDamage"
+                or attributeName == "WeaponDamage" or attributeName == "AttackDamage" then
+                weight = 100
+            elseif attributeName == "Power" or attributeName == "WeaponPower" then
+                weight = 10
+            end
+            score += value * weight
+        end
+    end
+
+    local rarity = tool:GetAttribute("Rarity")
+    if typeof(rarity) == "string" then
+        local rarityScores = {
+            Common = 1, Uncommon = 2, Rare = 3,
+            Epic = 4, Legendary = 5, Mythic = 6,
+        }
+        score += (rarityScores[rarity] or 0) * 100
+        foundStat = true
+    elseif typeof(rarity) == "number" then
+        score += rarity * 100
+        foundStat = true
+    end
+
+    return score, foundStat
+end
+
+local function isLikelyWeapon(tool)
+    if not tool or not tool:IsA("Tool") then
+        return false
+    end
+
+    local itemType = tool:GetAttribute("ItemType")
+    local weaponType = tool:GetAttribute("WeaponType")
+    if typeof(itemType) == "string" and string.find(string.lower(itemType), "weapon", 1, true) then
+        return true
+    end
+    if typeof(weaponType) == "string" and weaponType ~= "" then
+        return true
+    end
+    if tool:GetAttribute("IsWeapon") == true then
+        return true
+    end
+
+    local name = string.lower(tool.Name)
+    local weaponWords = {
+        "katana", "sword", "sickle", "scythe", "spear", "claw",
+        "wagasa", "tanto", "shotgun", "cleaver", "gauntlet",
+        "axe", "mace", "fan",
+    }
+    for _, word in ipairs(weaponWords) do
+        if string.find(name, word, 1, true) then
+            return true
+        end
+    end
+
+    return false
+end
+
+local function getAvailableTools()
+    local tools = {}
+    local character = LocalPlayer.Character
+    local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
+
+    if character then
+        for _, child in ipairs(character:GetChildren()) do
+            if child:IsA("Tool") and isLikelyWeapon(child) then
+                table.insert(tools, child)
+            end
+        end
+    end
+
+    if backpack then
+        for _, child in ipairs(backpack:GetChildren()) do
+            if child:IsA("Tool") and isLikelyWeapon(child) then
+                table.insert(tools, child)
+            end
+        end
+    end
+
+    return tools
+end
+
+local function selectBestAvailableWeapon()
+    if not State.AutoBestWeapon then
+        return false
+    end
+
+    local character, humanoid = getCharacter()
+    if not character or not humanoid then
+        return false
+    end
+
+    local tools = getAvailableTools()
+    if #tools == 0 then
+        status("No weapon Tool found in Character/Backpack; custom inventory cannot be read by this selector.", true)
+        return false
+    end
+
+    local bestTool
+    local bestScore = -math.huge
+    local bestHasStats = false
+
+    for _, tool in ipairs(tools) do
+        local score, hasStats = getToolNumericScore(tool)
+        -- If no exposed weapon stats exist, prefer the currently equipped weapon
+        -- rather than guessing an arbitrary ranking between names.
+        if hasStats then
+            if not bestHasStats or score > bestScore then
+                bestTool = tool
+                bestScore = score
+                bestHasStats = true
+            end
+        elseif not bestHasStats and character:FindFirstChildOfClass("Tool") == tool then
+            bestTool = tool
+        end
+    end
+
+    if not bestTool then
+        status("Weapon stats are not exposed; keeping the currently equipped weapon.", true)
+        return false
+    end
+
+    if character:FindFirstChildOfClass("Tool") ~= bestTool then
+        local ok, err = pcall(function()
+            humanoid:EquipTool(bestTool)
+        end)
+        if not ok then
+            warn("[SlayerAuto] Could not equip best weapon: " .. tostring(err))
+            status("Could not equip best weapon: " .. bestTool.Name, true)
+            return false
+        end
+    end
+
+    if State.LastBestWeapon ~= bestTool.Name then
+        State.LastBestWeapon = bestTool.Name
+        status(("Best available weapon: %s"):format(bestTool.Name), true)
+    end
+    return true
+end
+
 local function attackWhileClose(targetModel, targetHumanoid, generation)
     if not State.AutoCombat then
         return
@@ -436,6 +594,7 @@ local function attackWhileClose(targetModel, targetHumanoid, generation)
         return
     end
 
+    selectBestAvailableWeapon()
     InputHandler.VirtualPress("Combat", Enum.UserInputType.Touch)
     local started = os.clock()
 
@@ -617,6 +776,53 @@ farmSection:AddToggle({
         if not on then
             InputHandler.VirtualRelease("Combat")
         end
+    end,
+})
+
+local weaponSection = FarmingTab:AddSection({
+    Title = "Weapon Selection",
+    Description = "Automatically equips the strongest weapon that exposes readable stats in Character/Backpack.",
+    Icon = "⚔",
+    Color = Color3.fromRGB(168, 85, 247),
+})
+
+local function getEquippedToolName()
+    local character = LocalPlayer.Character
+    if not character then
+        return "none"
+    end
+
+    local tool = character:FindFirstChildOfClass("Tool")
+    return tool and tool.Name or "none"
+end
+
+weaponSection:AddToggle({
+    Title = "Auto Select Best Weapon",
+    Description = "Before attacking, compares weapon attributes and equips the highest-scoring available Tool.",
+    Default = true,
+    Callback = function(on)
+        State.AutoBestWeapon = on
+        if on then
+            selectBestAvailableWeapon()
+        end
+    end,
+})
+
+weaponSection:AddButton({
+    Title = "Find Best Weapon Now",
+    Description = "Searches equipped/backpack Tools and equips the best one when its stats are available.",
+    ButtonText = "Find Best",
+    Callback = function()
+        selectBestAvailableWeapon()
+    end,
+})
+
+weaponSection:AddButton({
+    Title = "Show Equipped Weapon",
+    Description = "Displays the Tool currently equipped on your character.",
+    ButtonText = "Check",
+    Callback = function()
+        status("Currently equipped: " .. getEquippedToolName(), true)
     end,
 })
 
