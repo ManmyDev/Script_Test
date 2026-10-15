@@ -11,6 +11,13 @@ local DashHandler = require(ReplicatedStorage.CAM.Client.Modules.GamePlay.Dash_H
 local SequenceTeleport = require(ReplicatedStorage.CAM.Client.Modules.SequenceTeleport)
 local GameSettings = require(ReplicatedStorage.CAM.Global.gameSettings)
 
+local Utility = require(ReplicatedStorage.CAM.Global.Utility)
+local CharacterInfo = require(ReplicatedStorage.CAM.Global.Character_info_provider)
+local CollectibleItems = require(ReplicatedStorage.CAM.Global.Collectibles.Items)
+local Checker = require(ReplicatedStorage.CAM.Global.Checker)
+local SignalEvent = require(ReplicatedStorage.Communication.ServerAndClient.Signals.SignalEvent)
+local ToolbarItemRestrictions = require(ReplicatedStorage.CAM.Global.Subsets.Gameplay.ToolbarItemRestrictions)
+
 NovaUI:SetTheme("Neon")
 
 local Window = NovaUI:CreateWindow({
@@ -568,7 +575,6 @@ local function getOwnedCombatItems()
     return result
 end
 
-
 local function getChild(container, name)
     if typeof(container) == "Instance" then
         return container:FindFirstChild(name)
@@ -620,7 +626,6 @@ local function findItemSlot(toolbar, itemId)
     return nil
 end
 
-
 local function selectToolbarSlot(slot)
     if not slot then
         return false
@@ -645,6 +650,123 @@ local function selectToolbarSlot(slot)
     State.SelectedWeaponSlot = slot.Index
     return true
 end
+
+local function selectBestAvailableWeapon()
+    if not State.AutoBestWeapon then
+        return false
+    end
+
+    local data = getInventoryData()
+
+    if not data then
+        status("Inventory data is not ready.", true)
+        return false
+    end
+
+    local toolbar = getToolbar(data)
+
+    if not toolbar then
+        status("Could not find the Hotbar data.", true)
+        return false
+    end
+
+    local items = getOwnedCombatItems()
+
+    if #items == 0 then
+        status("No owned combat weapons were found.", true)
+        return false
+    end
+
+    table.sort(items, function(a, b)
+        return a.Score > b.Score
+    end)
+
+    local bestItem = items[1]
+    local slot = findItemSlot(toolbar, bestItem.Id)
+
+    if not slot then
+        local ok, denied = pcall(function()
+            return Checker.DenyLoadoutChange(LocalPlayer)
+        end)
+
+        if not ok or denied == true then
+            status("The game currently restricts loadout changes.", true)
+            return false
+        end
+
+        -- หาช่อง Hotbar ที่ว่าง
+        for _, candidate in ipairs(TOOLBAR_SLOTS) do
+            local value = getChild(toolbar, candidate.Name)
+
+            if value and tonumber(getValue(value)) == 0 then
+                slot = candidate
+                break
+            end
+        end
+
+        -- ถ้าไม่มีช่องว่าง ให้ลองช่องสุดท้าย
+        slot = slot or TOOLBAR_SLOTS[#TOOLBAR_SLOTS]
+
+        local sent, err = pcall(function()
+            SignalEvent.ToServer(
+                "Toolbar_Equip",
+                slot.Name,
+                bestItem.Id
+            )
+        end)
+
+        if not sent then
+            warn("[SlayerAuto] Equip request failed:", err)
+            status("Could not request weapon equip.", true)
+            return false
+        end
+
+        -- รอให้ข้อมูล Hotbar อัปเดต
+        local deadline = os.clock() + 3
+
+        repeat
+            task.wait(0.15)
+
+            data = getInventoryData()
+            toolbar = getToolbar(data)
+
+            local currentSlot = getChild(toolbar, slot.Name)
+
+            if currentSlot
+                and tonumber(getValue(currentSlot)) == bestItem.Id then
+                break
+            end
+        until os.clock() >= deadline
+
+        local currentSlot = getChild(toolbar, slot.Name)
+
+        if not currentSlot
+            or tonumber(getValue(currentSlot)) ~= bestItem.Id then
+            status("The game did not confirm the Hotbar change.", true)
+            return false
+        end
+    end
+
+    if not selectToolbarSlot(slot) then
+        status("Could not select the weapon slot.", true)
+        return false
+    end
+
+    if State.LastBestWeapon ~= bestItem.Name then
+        State.LastBestWeapon = bestItem.Name
+
+        status(
+            ("Best weapon: %s | Slot %d"):format(
+                bestItem.Name,
+                slot.Index
+            ),
+            true
+        )
+    end
+
+    return true
+end
+
 
 local function selectBestAvailableWeapon()
     if not State.AutoBestWeapon then
@@ -860,9 +982,16 @@ local function runFarm(generation)
         if npc and npcHumanoid and npcRoot then
             status("Target: " .. npc.Name)
             if npcDistance > Config.ATTACK_RANGE then
-                if not maybeTeleportToward(npcRoot.Position, npcDistance, generation)
-                    and not maybeDashToward(npcRoot.Position, npcDistance) then
-                    moveToPosition(npcRoot.Position, generation)
+                if State.UseTeleport and SequenceTeleport.IsActive() then
+                    task.wait(0.15)
+                elseif not maybeTeleportToward(npcRoot.Position, npcDistance, generation) then
+                    if not State.Enabled or State.Generation ~= generation then
+                        break
+                    end
+                
+                    if not maybeDashToward(npcRoot.Position, npcDistance) then
+                        moveToPosition(npcRoot.Position, generation)
+                    end
                 end
             end
             attackWhileClose(npc, npcHumanoid, generation)
@@ -927,28 +1056,44 @@ farmSection:AddToggle({
     Description = "Find NPCs, approach, and use the normal combat input.",
     Default = false,
     Callback = function(on)
-        State.Enabled = on
         State.Generation += 1
         local generation = State.Generation
-
-        if on then
-            State.Busy = true
-            status("Auto Farm enabled", true)
-            task.spawn(function()
-                local ok, err = pcall(runFarm, generation)
+        State.Enabled = on
+    
+        if not on then
+            pcall(function()
                 InputHandler.VirtualRelease("Combat")
-                stopAutoRun()
-                State.Busy = false
-                if not ok then
-                    warn("[SlayerAuto] " .. tostring(err))
-                    status("Stopped because of an error", true)
-                end
             end)
-        else
-            InputHandler.VirtualRelease("Combat")
+    
             stopAutoRun()
             status("Auto Farm disabled", true)
+            return
         end
+    
+        status("Auto Farm enabled", true)
+    
+        task.spawn(function()
+            local ok, err = xpcall(function()
+                runFarm(generation)
+            end, debug.traceback)
+    
+            pcall(function()
+                InputHandler.VirtualRelease("Combat")
+            end)
+    
+            stopAutoRun()
+    
+            if not ok then
+                warn("[SlayerAuto] Auto Farm error:\n" .. tostring(err))
+    
+                if State.Generation == generation then
+                    State.Enabled = false
+                    State.Generation += 1
+                end
+    
+                status("Auto Farm stopped because of an error. Check console.", true)
+            end
+        end)
     end,
 })
 
