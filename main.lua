@@ -48,6 +48,8 @@ local State = {
     AutoLoot = true,
     UseDash = true,
     UseTeleport = true,
+    AutoRunHeld = false,
+    AutoRunToggledByAuto = false,
     SelectedWeaponSlot = 1,
     AutoBestWeapon = true,
     LastBestWeapon = nil,
@@ -226,7 +228,45 @@ local function getNearestChest()
     return bestChest, bestPrompt, bestDistance
 end
 
-local function moveToPosition(position, generation)
+local function startAutoRun()
+    -- If the player is already running manually (held or toggled), do not take ownership.
+    if RunHandler.Is_Running == true or RunHandler.Toggled == true or InputHandler.IsDown("Run") then
+        return
+    end
+
+    if State.AutoRunHeld or State.AutoRunToggledByAuto then
+        return
+    end
+
+    local wasToggled = RunHandler.Toggled == true
+    InputHandler.VirtualPress("Run", Enum.UserInputType.Keyboard)
+
+    -- The game's Run_Initiator toggles RunHandler.Toggled when Run is configured
+    -- as a toggle; otherwise it expects the Run input to remain held.
+    if not wasToggled and RunHandler.Toggled == true then
+        State.AutoRunToggledByAuto = true
+        InputHandler.VirtualRelease("Run")
+    else
+        State.AutoRunHeld = true
+    end
+end
+
+local function stopAutoRun()
+    if State.AutoRunHeld then
+        InputHandler.VirtualRelease("Run")
+        State.AutoRunHeld = false
+    end
+
+    if State.AutoRunToggledByAuto then
+        if RunHandler.Toggled == true then
+            InputHandler.VirtualPress("Run", Enum.UserInputType.Keyboard)
+            InputHandler.VirtualRelease("Run")
+        end
+        State.AutoRunToggledByAuto = false
+    end
+end
+
+local function moveToPositionInternal(position, generation)
     local character, humanoid, root = getCharacter()
     if not humanoid or not root then
         return false
@@ -291,6 +331,18 @@ local function moveToPosition(position, generation)
     end
 
     return true
+end
+
+local function moveToPosition(position, generation)
+    startAutoRun()
+    local ok, reached = pcall(moveToPositionInternal, position, generation)
+    stopAutoRun()
+
+    if not ok then
+        warn("[SlayerAuto] Navigation error: " .. tostring(reached))
+        return false
+    end
+    return reached == true
 end
 
 local lastDashAt = 0
@@ -729,6 +781,7 @@ local function runFarm(generation)
     end
 
     InputHandler.VirtualRelease("Combat")
+    stopAutoRun()
     State.Busy = false
 end
 
@@ -754,6 +807,7 @@ farmSection:AddToggle({
             task.spawn(function()
                 local ok, err = pcall(runFarm, generation)
                 InputHandler.VirtualRelease("Combat")
+                stopAutoRun()
                 State.Busy = false
                 if not ok then
                     warn("[SlayerAuto] " .. tostring(err))
@@ -762,6 +816,7 @@ farmSection:AddToggle({
             end)
         else
             InputHandler.VirtualRelease("Combat")
+            stopAutoRun()
             status("Auto Farm disabled", true)
         end
     end,
@@ -853,7 +908,7 @@ lootSection:AddToggle({
 
 local movementSection = MovementTab:AddSection({
     Title = "Navigation",
-    Description = "Pathfinding, dash, and the built-in teleport sequence for very distant targets.",
+    Description = "Uses Humanoid path movement and the game's Run_Handler while navigating, plus dash/teleport options.",
     Icon = "🏃",
     Color = Color3.fromRGB(239, 68, 68),
 })
@@ -884,6 +939,7 @@ movementSection:AddButton({
         State.Enabled = false
         State.Generation += 1
         InputHandler.VirtualRelease("Combat")
+        stopAutoRun()
         status("Stopped manually", true)
     end,
 })
