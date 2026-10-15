@@ -2,6 +2,7 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local CollectionService = game:GetService("CollectionService")
 local PathfindingService = game:GetService("PathfindingService")
+local LogService = game:GetService("LogService")
 
 local LocalPlayer = Players.LocalPlayer
 local NovaURL = "https://raw.githubusercontent.com/ManmyDev/Nova_UI/refs/heads/main/NovaUI.lua"
@@ -81,12 +82,249 @@ local Config = {
     MOVE_TIMEOUT = 5,
 }
 
+-- On-screen diagnostic console: captures client errors and warnings.
+local ConsoleState = {
+    Lines = {},
+    MaxLines = 35,
+    LastError = "No errors recorded.",
+}
+
+local consoleGui
+local consolePanel
+local consoleLog
+local consoleStatus
+local consoleListLayout
+
+local function pushConsoleLine(level, message)
+    message = tostring(message)
+    local timestamp = os.date("%H:%M:%S")
+    local lineText = ("[%s] [%s] %s"):format(timestamp, level, message)
+
+    table.insert(ConsoleState.Lines, lineText)
+    while #ConsoleState.Lines > ConsoleState.MaxLines do
+        table.remove(ConsoleState.Lines, 1)
+    end
+
+    if level == "ERROR" then
+        ConsoleState.LastError = message
+        if consoleStatus then
+            consoleStatus.Text = "LAST ERROR: " .. message
+            consoleStatus.TextColor3 = Color3.fromRGB(255, 105, 105)
+        end
+    elseif consoleStatus and ConsoleState.LastError == "No errors recorded." then
+        consoleStatus.Text = "Status: " .. message
+    end
+
+    if consoleLog then
+        for _, child in ipairs(consoleLog:GetChildren()) do
+            if child:IsA("TextLabel") then
+                child:Destroy()
+            end
+        end
+
+        for _, savedLine in ipairs(ConsoleState.Lines) do
+            local isError = string.find(savedLine, "[ERROR]", 1, true) ~= nil
+            local isWarning = string.find(savedLine, "[WARN]", 1, true) ~= nil
+            local label = Instance.new("TextLabel")
+            label.Name = "ConsoleLine"
+            label.BackgroundTransparency = 1
+            label.Size = UDim2.new(1, -8, 0, 0)
+            label.AutomaticSize = Enum.AutomaticSize.Y
+            label.Font = Enum.Font.Code
+            label.TextSize = 12
+            label.TextWrapped = true
+            label.TextXAlignment = Enum.TextXAlignment.Left
+            label.TextYAlignment = Enum.TextYAlignment.Top
+            label.Text = savedLine
+            label.TextColor3 = isError
+                and Color3.fromRGB(255, 110, 110)
+                or (isWarning and Color3.fromRGB(255, 196, 100)
+                    or Color3.fromRGB(210, 220, 235))
+            label.Parent = consoleLog
+        end
+
+        task.defer(function()
+            if consoleLog and consoleListLayout then
+                consoleLog.CanvasSize = UDim2.new(
+                    0, 0, 0, consoleListLayout.AbsoluteContentSize.Y + 12
+                )
+                consoleLog.CanvasPosition = Vector2.new(
+                    0, math.max(0, consoleListLayout.AbsoluteContentSize.Y)
+                )
+            end
+        end)
+    end
+end
+
+local function createDiagnosticConsole()
+    local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+    if not playerGui then
+        warn("[SlayerAuto] PlayerGui was not available; on-screen console was not created.")
+        return
+    end
+
+    local oldGui = playerGui:FindFirstChild("SlayerAutoDiagnosticConsole")
+    if oldGui then
+        oldGui:Destroy()
+    end
+
+    consoleGui = Instance.new("ScreenGui")
+    consoleGui.Name = "SlayerAutoDiagnosticConsole"
+    consoleGui.ResetOnSpawn = false
+    consoleGui.DisplayOrder = 999
+    consoleGui.Parent = playerGui
+
+    consolePanel = Instance.new("Frame")
+    consolePanel.Name = "ConsolePanel"
+    consolePanel.AnchorPoint = Vector2.new(1, 1)
+    consolePanel.Position = UDim2.new(1, -16, 1, -16)
+    consolePanel.Size = UDim2.new(0, 460, 0, 250)
+    consolePanel.BackgroundColor3 = Color3.fromRGB(18, 22, 31)
+    consolePanel.BackgroundTransparency = 0.08
+    consolePanel.BorderSizePixel = 0
+    consolePanel.Parent = consoleGui
+
+    local panelCorner = Instance.new("UICorner")
+    panelCorner.CornerRadius = UDim.new(0, 8)
+    panelCorner.Parent = consolePanel
+
+    local header = Instance.new("TextLabel")
+    header.Name = "Header"
+    header.BackgroundTransparency = 1
+    header.Position = UDim2.new(0, 10, 0, 5)
+    header.Size = UDim2.new(1, -100, 0, 25)
+    header.Font = Enum.Font.GothamBold
+    header.Text = "SLAYER AUTO  /  CONSOLE"
+    header.TextSize = 13
+    header.TextColor3 = Color3.fromRGB(230, 235, 245)
+    header.TextXAlignment = Enum.TextXAlignment.Left
+    header.Parent = consolePanel
+
+    local hideButton = Instance.new("TextButton")
+    hideButton.Name = "HideButton"
+    hideButton.Position = UDim2.new(1, -66, 0, 5)
+    hideButton.Size = UDim2.new(0, 56, 0, 24)
+    hideButton.BackgroundColor3 = Color3.fromRGB(55, 65, 81)
+    hideButton.BorderSizePixel = 0
+    hideButton.Font = Enum.Font.GothamBold
+    hideButton.Text = "HIDE"
+    hideButton.TextSize = 11
+    hideButton.TextColor3 = Color3.new(1, 1, 1)
+    hideButton.Parent = consolePanel
+    Instance.new("UICorner", hideButton).CornerRadius = UDim.new(0, 5)
+
+    consoleStatus = Instance.new("TextLabel")
+    consoleStatus.Name = "StatusLine"
+    consoleStatus.BackgroundColor3 = Color3.fromRGB(30, 36, 48)
+    consoleStatus.BorderSizePixel = 0
+    consoleStatus.Position = UDim2.new(0, 8, 0, 34)
+    consoleStatus.Size = UDim2.new(1, -16, 0, 30)
+    consoleStatus.Font = Enum.Font.Gotham
+    consoleStatus.Text = "Status: Console ready; waiting for errors."
+    consoleStatus.TextSize = 11
+    consoleStatus.TextColor3 = Color3.fromRGB(160, 220, 180)
+    consoleStatus.TextWrapped = true
+    consoleStatus.TextXAlignment = Enum.TextXAlignment.Left
+    consoleStatus.Parent = consolePanel
+    Instance.new("UICorner", consoleStatus).CornerRadius = UDim.new(0, 4)
+
+    consoleLog = Instance.new("ScrollingFrame")
+    consoleLog.Name = "Log"
+    consoleLog.Position = UDim2.new(0, 8, 0, 70)
+    consoleLog.Size = UDim2.new(1, -16, 1, -78)
+    consoleLog.BackgroundColor3 = Color3.fromRGB(10, 13, 19)
+    consoleLog.BorderSizePixel = 0
+    consoleLog.ScrollBarThickness = 6
+    consoleLog.CanvasSize = UDim2.new(0, 0, 0, 0)
+    consoleLog.Parent = consolePanel
+    Instance.new("UICorner", consoleLog).CornerRadius = UDim.new(0, 4)
+
+    consoleListLayout = Instance.new("UIListLayout")
+    consoleListLayout.Padding = UDim.new(0, 3)
+    consoleListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    consoleListLayout.Parent = consoleLog
+
+    local logPadding = Instance.new("UIPadding")
+    logPadding.PaddingTop = UDim.new(0, 5)
+    logPadding.PaddingBottom = UDim.new(0, 5)
+    logPadding.PaddingLeft = UDim.new(0, 5)
+    logPadding.PaddingRight = UDim.new(0, 5)
+    logPadding.Parent = consoleLog
+
+    local openButton = Instance.new("TextButton")
+    openButton.Name = "OpenConsoleButton"
+    openButton.AnchorPoint = Vector2.new(1, 1)
+    openButton.Position = UDim2.new(1, -16, 1, -16)
+    openButton.Size = UDim2.new(0, 145, 0, 34)
+    openButton.BackgroundColor3 = Color3.fromRGB(30, 41, 59)
+    openButton.BorderSizePixel = 0
+    openButton.Font = Enum.Font.GothamBold
+    openButton.Text = "OPEN ERROR CONSOLE"
+    openButton.TextSize = 11
+    openButton.TextColor3 = Color3.new(1, 1, 1)
+    openButton.Visible = false
+    openButton.Parent = consoleGui
+    Instance.new("UICorner", openButton).CornerRadius = UDim.new(0, 6)
+
+    hideButton.Activated:Connect(function()
+        consolePanel.Visible = false
+        openButton.Visible = true
+    end)
+
+    openButton.Activated:Connect(function()
+        consolePanel.Visible = true
+        openButton.Visible = false
+    end)
+
+    local clearButton = Instance.new("TextButton")
+    clearButton.Name = "ClearButton"
+    clearButton.Position = UDim2.new(1, -130, 0, 5)
+    clearButton.Size = UDim2.new(0, 56, 0, 24)
+    clearButton.BackgroundColor3 = Color3.fromRGB(55, 65, 81)
+    clearButton.BorderSizePixel = 0
+    clearButton.Font = Enum.Font.GothamBold
+    clearButton.Text = "CLEAR"
+    clearButton.TextSize = 11
+    clearButton.TextColor3 = Color3.new(1, 1, 1)
+    clearButton.Parent = consolePanel
+    Instance.new("UICorner", clearButton).CornerRadius = UDim.new(0, 5)
+    clearButton.Activated:Connect(function()
+        ConsoleState.Lines = {}
+        ConsoleState.LastError = "No errors recorded."
+        if consoleStatus then
+            consoleStatus.Text = "Status: Log cleared; waiting for errors."
+            consoleStatus.TextColor3 = Color3.fromRGB(160, 220, 180)
+        end
+        pushConsoleLine("INFO", "Console log cleared.")
+    end)
+
+    pushConsoleLine("INFO", "Console initialized. Errors and warnings will appear here.")
+end
+
+createDiagnosticConsole()
+
+-- Roblox client output -> on-screen console.
+LogService.MessageOut:Connect(function(message, messageType)
+    if messageType == Enum.MessageType.MessageError then
+        -- The Auto Farm traceback is added explicitly below to avoid duplicate entries.
+        if not string.find(message, "[SlayerAuto] Auto Farm error:", 1, true) then
+            pushConsoleLine("ERROR", message)
+        end
+    elseif messageType == Enum.MessageType.MessageWarning then
+        pushConsoleLine("WARN", message)
+    end
+end)
+
 local function status(message, notify)
     if State.LastStatus == message then
         return
     end
     State.LastStatus = message
     print("[SlayerAuto] " .. message)
+    if consoleStatus and ConsoleState.LastError == "No errors recorded." then
+        consoleStatus.Text = "STATUS: " .. tostring(message)
+        consoleStatus.TextColor3 = Color3.fromRGB(160, 220, 180)
+    end
     if notify then
         Window:Notify({
             Title = "Slayer Auto",
@@ -484,13 +722,6 @@ end
 
 
 -- Inventory / Hotbar weapon selector
-local Utility = require(ReplicatedStorage.CAM.Global.Utility)
-local CharacterInfo = require(ReplicatedStorage.CAM.Global.Character_info_provider)
-local CollectibleItems = require(ReplicatedStorage.CAM.Global.Collectibles.Items)
-local Checker = require(ReplicatedStorage.CAM.Global.Checker)
-local SignalEvent = require(
-    ReplicatedStorage.Communication.ServerAndClient.Signals.SignalEvent
-)
 
 local TOOLBAR_SLOTS = {
     { Name = "One", Index = 1, Input = "Toolbar_1st" },
@@ -575,6 +806,7 @@ local function getOwnedCombatItems()
     return result
 end
 
+
 local function getChild(container, name)
     if typeof(container) == "Instance" then
         return container:FindFirstChild(name)
@@ -626,6 +858,7 @@ local function findItemSlot(toolbar, itemId)
     return nil
 end
 
+
 local function selectToolbarSlot(slot)
     if not slot then
         return false
@@ -650,123 +883,6 @@ local function selectToolbarSlot(slot)
     State.SelectedWeaponSlot = slot.Index
     return true
 end
-
-local function selectBestAvailableWeapon()
-    if not State.AutoBestWeapon then
-        return false
-    end
-
-    local data = getInventoryData()
-
-    if not data then
-        status("Inventory data is not ready.", true)
-        return false
-    end
-
-    local toolbar = getToolbar(data)
-
-    if not toolbar then
-        status("Could not find the Hotbar data.", true)
-        return false
-    end
-
-    local items = getOwnedCombatItems()
-
-    if #items == 0 then
-        status("No owned combat weapons were found.", true)
-        return false
-    end
-
-    table.sort(items, function(a, b)
-        return a.Score > b.Score
-    end)
-
-    local bestItem = items[1]
-    local slot = findItemSlot(toolbar, bestItem.Id)
-
-    if not slot then
-        local ok, denied = pcall(function()
-            return Checker.DenyLoadoutChange(LocalPlayer)
-        end)
-
-        if not ok or denied == true then
-            status("The game currently restricts loadout changes.", true)
-            return false
-        end
-
-        -- หาช่อง Hotbar ที่ว่าง
-        for _, candidate in ipairs(TOOLBAR_SLOTS) do
-            local value = getChild(toolbar, candidate.Name)
-
-            if value and tonumber(getValue(value)) == 0 then
-                slot = candidate
-                break
-            end
-        end
-
-        -- ถ้าไม่มีช่องว่าง ให้ลองช่องสุดท้าย
-        slot = slot or TOOLBAR_SLOTS[#TOOLBAR_SLOTS]
-
-        local sent, err = pcall(function()
-            SignalEvent.ToServer(
-                "Toolbar_Equip",
-                slot.Name,
-                bestItem.Id
-            )
-        end)
-
-        if not sent then
-            warn("[SlayerAuto] Equip request failed:", err)
-            status("Could not request weapon equip.", true)
-            return false
-        end
-
-        -- รอให้ข้อมูล Hotbar อัปเดต
-        local deadline = os.clock() + 3
-
-        repeat
-            task.wait(0.15)
-
-            data = getInventoryData()
-            toolbar = getToolbar(data)
-
-            local currentSlot = getChild(toolbar, slot.Name)
-
-            if currentSlot
-                and tonumber(getValue(currentSlot)) == bestItem.Id then
-                break
-            end
-        until os.clock() >= deadline
-
-        local currentSlot = getChild(toolbar, slot.Name)
-
-        if not currentSlot
-            or tonumber(getValue(currentSlot)) ~= bestItem.Id then
-            status("The game did not confirm the Hotbar change.", true)
-            return false
-        end
-    end
-
-    if not selectToolbarSlot(slot) then
-        status("Could not select the weapon slot.", true)
-        return false
-    end
-
-    if State.LastBestWeapon ~= bestItem.Name then
-        State.LastBestWeapon = bestItem.Name
-
-        status(
-            ("Best weapon: %s | Slot %d"):format(
-                bestItem.Name,
-                slot.Index
-            ),
-            true
-        )
-    end
-
-    return true
-end
-
 
 local function selectBestAvailableWeapon()
     if not State.AutoBestWeapon then
@@ -1084,6 +1200,7 @@ farmSection:AddToggle({
             stopAutoRun()
     
             if not ok then
+                pushConsoleLine("ERROR", "Auto Farm crashed:\n" .. tostring(err))
                 warn("[SlayerAuto] Auto Farm error:\n" .. tostring(err))
     
                 if State.Generation == generation then
