@@ -476,100 +476,142 @@ local function maybeDashToward(targetPosition, distance)
 end
 
 
-local function getToolNumericScore(tool)
-    local score = 0
-    local foundStat = false
+-- Inventory / Hotbar weapon selector
+local Utility = require(ReplicatedStorage.CAM.Global.Utility)
+local CharacterInfo = require(ReplicatedStorage.CAM.Global.Character_info_provider)
+local CollectibleItems = require(ReplicatedStorage.CAM.Global.Collectibles.Items)
+local Checker = require(ReplicatedStorage.CAM.Global.Checker)
+local SignalEvent = require(
+    ReplicatedStorage.Communication.ServerAndClient.Signals.SignalEvent
+)
 
-    local numericAttributes = {
-        "Damage", "BaseDamage", "WeaponDamage", "AttackDamage",
-        "Power", "WeaponPower", "Level", "Mastery", "WeaponLevel",
-    }
+local TOOLBAR_SLOTS = {
+    { Name = "One", Index = 1, Input = "Toolbar_1st" },
+    { Name = "Two", Index = 2, Input = "Toolbar_2nd" },
+    { Name = "Three", Index = 3, Input = "Toolbar_3rd" },
+    { Name = "Four", Index = 4, Input = "Toolbar_4th" },
+    { Name = "Five", Index = 5, Input = "Toolbar_5th" },
+}
 
-    for _, attributeName in ipairs(numericAttributes) do
-        local value = tool:GetAttribute(attributeName)
-        if typeof(value) == "number" then
-            foundStat = true
-            local weight = 1
-            if attributeName == "Damage" or attributeName == "BaseDamage"
-                or attributeName == "WeaponDamage" or attributeName == "AttackDamage" then
-                weight = 100
-            elseif attributeName == "Power" or attributeName == "WeaponPower" then
-                weight = 10
+local function getInventoryData()
+    local ok, data = pcall(function()
+        return Utility.GetData(LocalPlayer, true)
+    end)
+
+    if not ok or not data then
+        warn("[SlayerAuto] Unable to read player data")
+        return nil
+    end
+
+    return data
+end
+
+local function getOwnedCombatItems()
+    local result = {}
+
+    local ok, bags = pcall(function()
+        return CharacterInfo.GetItemBags(LocalPlayer)
+    end)
+
+    if not ok or type(bags) ~= "table" then
+        warn("[SlayerAuto] Unable to read item bags")
+        return result
+    end
+
+    for _, bag in ipairs(bags) do
+        if typeof(bag) == "Instance" then
+            for _, entry in ipairs(bag:GetChildren()) do
+                local definition = CollectibleItems[entry.Name]
+
+                if type(definition) == "table"
+                    and definition.HasCombat == true
+                    and type(definition.CombatPreset) == "string" then
+
+                    local idObject = entry:FindFirstChild("Id")
+                    local itemId = idObject
+                        and tonumber(idObject.Value)
+
+                    if itemId then
+                        local score = 0
+                        local stats = definition.ActiveToolStats
+
+                        if type(stats) == "table" then
+                            for statName, value in pairs(stats) do
+                                if typeof(value) == "number" then
+                                    local name = string.lower(tostring(statName))
+
+                                    if string.find(name, "damage", 1, true) then
+                                        score += value * 100
+                                    else
+                                        score += value
+                                    end
+                                end
+                            end
+                        end
+
+                        local rarity = definition.Rarity
+                        if typeof(rarity) == "number" then
+                            score += rarity * 10
+                        end
+
+                        table.insert(result, {
+                            Id = itemId,
+                            Name = entry.Name,
+                            Score = score,
+                        })
+                    end
+                end
             end
-            score += value * weight
         end
     end
 
-    local rarity = tool:GetAttribute("Rarity")
-    if typeof(rarity) == "string" then
-        local rarityScores = {
-            Common = 1, Uncommon = 2, Rare = 3,
-            Epic = 4, Legendary = 5, Mythic = 6,
-        }
-        score += (rarityScores[rarity] or 0) * 100
-        foundStat = true
-    elseif typeof(rarity) == "number" then
-        score += rarity * 100
-        foundStat = true
-    end
-
-    return score, foundStat
+    return result
 end
 
-local function isLikelyWeapon(tool)
-    if not tool or not tool:IsA("Tool") then
+local function getToolbar(data)
+    local inventory = data and data:FindFirstChild("Inventory")
+    return inventory and inventory:FindFirstChild("Toolbar")
+end
+
+local function findItemSlot(toolbar, itemId)
+    if not toolbar then
+        return nil
+    end
+
+    for _, slot in ipairs(TOOLBAR_SLOTS) do
+        local value = toolbar:FindFirstChild(slot.Name)
+
+        if value and tonumber(value.Value) == itemId then
+            return slot
+        end
+    end
+
+    return nil
+end
+
+local function selectToolbarSlot(slot)
+    if not slot then
         return false
     end
 
-    local itemType = tool:GetAttribute("ItemType")
-    local weaponType = tool:GetAttribute("WeaponType")
-    if typeof(itemType) == "string" and string.find(string.lower(itemType), "weapon", 1, true) then
-        return true
-    end
-    if typeof(weaponType) == "string" and weaponType ~= "" then
-        return true
-    end
-    if tool:GetAttribute("IsWeapon") == true then
-        return true
-    end
+    local ok, err = pcall(function()
+        InputHandler.VirtualPress(
+            slot.Input,
+            Enum.UserInputType.Touch
+        )
 
-    local name = string.lower(tool.Name)
-    local weaponWords = {
-        "katana", "sword", "sickle", "scythe", "spear", "claw",
-        "wagasa", "tanto", "shotgun", "cleaver", "gauntlet",
-        "axe", "mace", "fan",
-    }
-    for _, word in ipairs(weaponWords) do
-        if string.find(name, word, 1, true) then
-            return true
-        end
+        task.wait(0.05)
+
+        InputHandler.VirtualRelease(slot.Input)
+    end)
+
+    if not ok then
+        warn("[SlayerAuto] Hotbar selection error:", err)
+        return false
     end
 
-    return false
-end
-
-local function getAvailableTools()
-    local tools = {}
-    local character = LocalPlayer.Character
-    local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
-
-    if character then
-        for _, child in ipairs(character:GetChildren()) do
-            if child:IsA("Tool") and isLikelyWeapon(child) then
-                table.insert(tools, child)
-            end
-        end
-    end
-
-    if backpack then
-        for _, child in ipairs(backpack:GetChildren()) do
-            if child:IsA("Tool") and isLikelyWeapon(child) then
-                table.insert(tools, child)
-            end
-        end
-    end
-
-    return tools
+    State.SelectedWeaponSlot = slot.Index
+    return true
 end
 
 local function selectBestAvailableWeapon()
@@ -577,56 +619,112 @@ local function selectBestAvailableWeapon()
         return false
     end
 
-    local character, humanoid = getCharacter()
-    if not character or not humanoid then
+    local data = getInventoryData()
+    if not data then
+        status("Inventory data is not ready.", true)
         return false
     end
 
-    local tools = getAvailableTools()
-    if #tools == 0 then
-        status("No weapon Tool found in Character/Backpack; custom inventory cannot be read by this selector.", true)
+    local toolbar = getToolbar(data)
+    if not toolbar then
+        status("Could not find the Hotbar data.", true)
         return false
     end
 
-    local bestTool
-    local bestScore = -math.huge
-    local bestHasStats = false
-
-    for _, tool in ipairs(tools) do
-        local score, hasStats = getToolNumericScore(tool)
-        -- If no exposed weapon stats exist, prefer the currently equipped weapon
-        -- rather than guessing an arbitrary ranking between names.
-        if hasStats then
-            if not bestHasStats or score > bestScore then
-                bestTool = tool
-                bestScore = score
-                bestHasStats = true
-            end
-        elseif not bestHasStats and character:FindFirstChildOfClass("Tool") == tool then
-            bestTool = tool
-        end
-    end
-
-    if not bestTool then
-        status("Weapon stats are not exposed; keeping the currently equipped weapon.", true)
+    local items = getOwnedCombatItems()
+    if #items == 0 then
+        status("No owned combat weapons were found.", true)
         return false
     end
 
-    if character:FindFirstChildOfClass("Tool") ~= bestTool then
-        local ok, err = pcall(function()
-            humanoid:EquipTool(bestTool)
+    table.sort(items, function(a, b)
+        return a.Score > b.Score
+    end)
+
+    local bestItem = items[1]
+    local slot = findItemSlot(toolbar, bestItem.Id)
+
+    if not slot then
+        local ok, denied = pcall(function()
+            return Checker.DenyLoadoutChange(LocalPlayer)
         end)
-        if not ok then
-            warn("[SlayerAuto] Could not equip best weapon: " .. tostring(err))
-            status("Could not equip best weapon: " .. bestTool.Name, true)
+
+        if not ok or denied == true then
+            status("The game currently restricts loadout changes.", true)
+            return false
+        end
+
+        -- Prefer an empty slot; otherwise try the last slot.
+        for _, candidate in ipairs(TOOLBAR_SLOTS) do
+            local value = toolbar:FindFirstChild(candidate.Name)
+
+            if value and tonumber(value.Value) == 0 then
+                slot = candidate
+                break
+            end
+        end
+
+        slot = slot or TOOLBAR_SLOTS[#TOOLBAR_SLOTS]
+
+        -- Request the game's normal equip action.
+        local sent, err = pcall(function()
+            SignalEvent.ToServer(
+                "Toolbar_Equip",
+                slot.Name,
+                bestItem.Id
+            )
+        end)
+
+        if not sent then
+            warn("[SlayerAuto] Equip request failed:", err)
+            status("Could not request weapon equip.", true)
+            return false
+        end
+
+        -- Wait for the game to update the replicated Hotbar.
+        local deadline = os.clock() + 3
+
+        repeat
+            task.wait(0.15)
+
+            data = getInventoryData()
+            toolbar = getToolbar(data)
+
+            local currentSlot = toolbar
+                and toolbar:FindFirstChild(slot.Name)
+
+            if currentSlot
+                and tonumber(currentSlot.Value) == bestItem.Id then
+                break
+            end
+        until os.clock() >= deadline
+
+        local currentSlot = toolbar
+            and toolbar:FindFirstChild(slot.Name)
+
+        if not currentSlot
+            or tonumber(currentSlot.Value) ~= bestItem.Id then
+            status("The game did not confirm the Hotbar change.", true)
             return false
         end
     end
 
-    if State.LastBestWeapon ~= bestTool.Name then
-        State.LastBestWeapon = bestTool.Name
-        status(("Best available weapon: %s"):format(bestTool.Name), true)
+    if not selectToolbarSlot(slot) then
+        status("Could not select the weapon slot.", true)
+        return false
     end
+
+    if State.LastBestWeapon ~= bestItem.Name then
+        State.LastBestWeapon = bestItem.Name
+        status(
+            ("Best weapon: %s | Slot %d"):format(
+                bestItem.Name,
+                slot.Index
+            ),
+            true
+        )
+    end
+
     return true
 end
 
