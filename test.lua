@@ -7,7 +7,8 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Players = game:GetService("Players")
 local PathfindingService = game:GetService("PathfindingService")
 
-local NovaUI = require(ReplicatedStorage:WaitForChild("NovaUI"))
+local NovaURL = "https://raw.githubusercontent.com/ManmyDev/Nova_UI/refs/heads/main/NovaUI.lua"
+local NovaUI = loadstring(game:HttpGet(NovaURL))()
 
 -- อ้างอิง Remotes ของระบบการต่อสู้
 local Remotes = ReplicatedStorage:FindFirstChild("Remotes") or ReplicatedStorage:FindFirstChild("CAM")
